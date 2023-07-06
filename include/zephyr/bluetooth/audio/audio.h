@@ -978,7 +978,7 @@ struct bt_audio_lc3_preset {
 #define BT_AUDIO_LC3_BROADCAST_PRESET_16_2_1(_loc, _stream_context) \
 	BT_AUDIO_LC3_PRESET( \
 		BT_CODEC_LC3_CONFIG_16_2(_loc, _stream_context), \
-		BT_CODEC_LC3_QOS_10_UNFRAMED(40u, 2u, 10u, 40000u) \
+		BT_CODEC_LC3_QOS_10_UNFRAMED(40u, 0u, 10u, 40000u) \
 	)
 
 /**

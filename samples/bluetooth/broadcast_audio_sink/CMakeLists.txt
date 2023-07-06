@@ -8,4 +8,12 @@ target_sources(app PRIVATE
   src/main.c
 )
 
-zephyr_library_include_directories(${ZEPHYR_BASE}/samples/bluetooth)
+zephyr_library_include_directories(
+  ${ZEPHYR_BASE}/samples/bluetooth
+  src/audio
+  src/modules
+)
+
+add_subdirectory(src/audio)
+add_subdirectory(src/drivers)
+add_subdirectory(src/modules)

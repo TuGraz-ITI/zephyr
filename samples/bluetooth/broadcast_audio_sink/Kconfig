@@ -1,0 +1,217 @@
+#
+# Copyright (c) 2022 Nordic Semiconductor ASA
+#
+# SPDX-License-Identifier: LicenseRef-Nordic-5-Clause
+#
+
+mainmenu "Bluetooth: Broadcast Audio Sink"
+
+config MAIN_THREAD_PRIORITY
+	int
+	default 10
+
+config MAIN_STACK_SIZE
+	int
+	default 3616
+
+config SYSTEM_WORKQUEUE_STACK_SIZE
+	int
+	default 4096
+
+config THREAD_NAME
+	bool
+	default y
+
+config HW_CODEC_CIRRUS_LOGIC
+	bool
+	default y
+
+config NRFX_I2S
+	bool
+	default y
+
+config NRFX_I2S0
+	bool
+	default y
+
+config NRFX_CLOCK
+	bool
+	default y
+
+config NRFX_TIMER1
+	bool
+	default y
+
+#----------------------------------------------------------------------------#
+menu "Bluetooth"
+
+choice BT_AUDIO_BROADCAST_BAP_CONFIGURATION
+	prompt "Broadcast codec configuration"
+	default BT_BAP_BROADCAST_16_2_1
+	help
+	  Select the broadcast codec configuration as given
+	  in Table 6.4 of the BAP specification.
+	  USB only supports 48 kHz samplig rate.
+
+config BT_BAP_BROADCAST_16_2_1
+	bool "16_2_1"
+	help
+	  Broadcast mandatory codec capability 16_2_1
+	  16kHz, 32kbps, 2 retransmits, 10ms transport latency, and 40ms presentation delay.
+
+config BT_BAP_BROADCAST_24_2_1
+	bool "24_2_1"
+	help
+	  Broadcast codec capability 24_2_1
+	  24kHz, 48kbps, 2 retransmits, 10ms transport latency, and 40ms presentation delay.
+
+config BT_BAP_BROADCAST_16_2_2
+	bool "16_2_2"
+	help
+	  Broadcast mandatory codec capability 16_2_2
+	  16kHz, 32kbps, 4 retransmits, 60ms transport latency, and 40ms presentation delay.
+
+config BT_BAP_BROADCAST_24_2_2
+	bool "24_2_2"
+	help
+	  Broadcast codec capability 24_2_2
+	  24kHz, 48kbps, 4 retransmits, 60ms transport latency, and 40ms presentation delay.
+endchoice
+
+endmenu # Bluetooth
+
+#----------------------------------------------------------------------------#
+menu "Audio"
+
+choice AUDIO_FRAME_DURATION
+	prompt "Select frame duration"
+	default AUDIO_FRAME_DURATION_10_MS
+	help
+	  LC3 supports frame duration of 7.5 and 10 ms.
+
+config AUDIO_FRAME_DURATION_7_5_MS
+	bool "7.5 ms"
+
+config AUDIO_FRAME_DURATION_10_MS
+	bool "10 ms"
+endchoice
+
+config AUDIO_FRAME_DURATION_US
+	int
+	default 7500 if AUDIO_FRAME_DURATION_7_5_MS
+	default 10000 if AUDIO_FRAME_DURATION_10_MS
+	help
+	  Audio frame duration in µs.
+
+choice AUDIO_SAMPLE_RATE
+	prompt "Audio sample rate"
+	default AUDIO_SAMPLE_RATE_16000_HZ if BT_BAP_BROADCAST_16_2_1 || BT_BAP_BROADCAST_16_2_2 || BT_BAP_UNICAST_16_2_1
+	default AUDIO_SAMPLE_RATE_24000_HZ if BT_BAP_BROADCAST_24_2_1 || BT_BAP_BROADCAST_24_2_2 || BT_BAP_UNICAST_24_2_1
+	default AUDIO_SAMPLE_RATE_48000_HZ
+	help
+	  This will be selected based on the BAP settings.
+
+config AUDIO_SAMPLE_RATE_16000_HZ
+	bool "16 kHz"
+	help
+	  Sample rate of 16kHz.
+
+config AUDIO_SAMPLE_RATE_24000_HZ
+	bool "24 kHz"
+	help
+	  Sample rate of 24kHz.
+
+config AUDIO_SAMPLE_RATE_48000_HZ
+	bool "48 kHz"
+	help
+	  Sample rate of 48kHz.
+endchoice
+
+config AUDIO_SAMPLE_RATE_HZ
+	int
+	default 16000 if AUDIO_SAMPLE_RATE_16000_HZ
+	default 24000 if AUDIO_SAMPLE_RATE_24000_HZ
+	default 48000 if AUDIO_SAMPLE_RATE_48000_HZ
+	help
+	  I2S supports 16, 24, and 48 kHz sample rates for both input and output.
+	  USB supports only 48 kHz for input.
+
+choice AUDIO_BIT_DEPTH
+	prompt "Audio bit depth"
+	default AUDIO_BIT_DEPTH_16
+	help
+	  Select the bit depth for audio.
+
+config AUDIO_BIT_DEPTH_16
+	bool "16 bit audio"
+
+config AUDIO_BIT_DEPTH_32
+	bool "32 bit audio"
+endchoice
+
+config AUDIO_BIT_DEPTH_BITS
+	int
+	default 16 if AUDIO_BIT_DEPTH_16
+	default 32 if AUDIO_BIT_DEPTH_32
+	help
+	  Bit depth of one sample in storage.
+
+config AUDIO_BIT_DEPTH_OCTETS
+	int
+	default 2 if AUDIO_BIT_DEPTH_16
+	default 4 if AUDIO_BIT_DEPTH_32
+	help
+	  Bit depth of one sample in storage given in octets.
+
+choice AUDIO_CODEC_DEFAULT
+	prompt "Audio codec"
+	default CODEC_LC3
+	help
+	  Select the default codec to use on start up.
+
+config CODEC_LC3
+	bool "LC3"
+	select SW_CODEC_LC3_T2_SOFTWARE
+	help
+	  LC3 is the mandatory codec for LE Audio.
+endchoice
+
+endmenu # Audio
+
+#----------------------------------------------------------------------------#
+menu "I2S"
+
+config I2S_LRCK_FREQ_HZ
+	int
+	default AUDIO_SAMPLE_RATE_HZ
+	help
+	 The sample rate of I2S. For now this is tied directly to
+	 AUDIO_SAMPLE_RATE_HZ
+	 Note that this setting is only valid in I2S master mode.
+
+config I2S_CH_NUM
+	int
+	default 2
+	help
+	 The I2S driver itself supports both mono and stereo.
+	 Parts of the implementation are configured for only stereo.
+
+endmenu # I2S
+
+#----------------------------------------------------------------------------#
+menu "FIFO"
+
+config FIFO_FRAME_SPLIT_NUM
+	int "Number of blocks to make up one frame of audio data"
+	default 10
+	help
+	  Easy DMA in I2S requires two buffers to be filled before I2S
+	  transmission will begin. In order to reduce latency, an audio
+	  frame can be split into multiple blocks with this parameter. USB
+	  sends data in 1 ms blocks, so we need the split to match that.
+	  Since we set frame size to 10 ms for USB, 10 is selected as
+	  FRAME_SPLIT_NUM
+
+endmenu # FIFO
+
+source "Kconfig.zephyr"

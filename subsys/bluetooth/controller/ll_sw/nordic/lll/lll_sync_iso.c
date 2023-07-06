@@ -9,6 +9,7 @@
 
 #include <soc.h>
 #include <zephyr/sys/byteorder.h>
+#include <zephyr/ipc/ipc_service.h>
 
 #include "hal/cpu.h"
 #include "hal/ccm.h"
@@ -55,6 +56,20 @@ static void isr_rx_iso_data_invalid(const struct lll_sync_iso *const lll,
 				    uint8_t bn, uint16_t handle,
 				    struct node_rx_pdu *node_rx);
 static void isr_rx_ctrl_recv(struct lll_sync_iso *lll, struct pdu_bis *pdu);
+
+uint8_t chan_map_prev[5] = { 0x0, 0x0, 0x0, 0x0, 0x0 };
+static void bound_cb(void *priv){}
+static void recv_cb(const void *data, size_t len, void *priv){}
+static struct ipc_ept_cfg ept0_cfg = {
+   .name = "ept0",
+   .cb = {
+      .bound    = bound_cb,
+      .received = recv_cb,
+   },
+};
+
+const struct device *inst0;
+struct ipc_ept ept0;
 
 /* FIXME: Optimize by moving to a common place, as similar variable is used for
  *        connections too.
@@ -182,6 +197,9 @@ static int prepare_cb(struct lll_prepare_param *p)
 	return 0;
 }
 
+static bool ipc_initialized = false;
+static uint8_t send_initial_chm_counter = PDU_AC_EXT_HEADER_SIZE_MAX; // skip a few events
+
 static int prepare_cb_common(struct lll_prepare_param *p)
 {
 	struct lll_sync_iso_stream *stream;
@@ -255,6 +273,30 @@ static int prepare_cb_common(struct lll_prepare_param *p)
 
 	/* Initialize stream current */
 	lll->stream_curr = 0U;
+
+	/* Send channel map via IPC */
+	if (!ipc_initialized) {
+		int ret;
+		inst0 = DEVICE_DT_GET(DT_NODELABEL(ipc0));
+		ret = ipc_service_open_instance(inst0);
+		ret = ipc_service_register_endpoint(inst0, &ept0, &ept0_cfg);
+		ipc_initialized = true;
+	}
+
+	bool send_ipc = false;
+	for (uint8_t i = 0; i < 5; i++) {
+		if (lll->data_chan_map[i] != chan_map_prev[i]) {
+			send_ipc = true;
+			break;
+		}
+	}	
+	if (send_initial_chm_counter > 0) {
+		send_initial_chm_counter--;
+	}
+	if ((send_ipc || send_initial_chm_counter == 1) && ipc_initialized) {
+   		ipc_service_send(&ept0, &lll->data_chan_map, PDU_CHANNEL_MAP_SIZE);
+	}
+	(void)memcpy(&chan_map_prev, lll->data_chan_map, 5 * sizeof(uint8_t));
 
 	/* Skip subevents until first selected BIS */
 	stream_handle = lll->stream_handle[lll->stream_curr];

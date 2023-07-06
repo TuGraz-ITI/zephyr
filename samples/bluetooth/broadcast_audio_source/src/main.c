@@ -2,38 +2,127 @@
  * Copyright (c) 2022 Nordic Semiconductor ASA
  *
  * SPDX-License-Identifier: Apache-2.0
+ * 
+ * This file contains parts of the Zephyr RTOS repository
+ * as well as the nrf-sdk repository on GitHub.
+ * 
  */
 
 #include <zephyr/bluetooth/bluetooth.h>
 #include <zephyr/bluetooth/audio/audio.h>
+#include <zephyr/storage/disk_access.h>
+#include <zephyr/drivers/gpio.h>
+#include <zephyr/kernel.h>
+#include <zephyr/device.h>
+#include <zephyr/fs/fs.h>
+#include <lc3.h>
+#include <ff.h>
 
-/* When BROADCAST_ENQUEUE_COUNT > 1 we can enqueue enough buffers to ensure that
- * the controller is never idle
- */
-#define BROADCAST_ENQUEUE_COUNT 2U
-#define TOTAL_BUF_NEEDED (BROADCAST_ENQUEUE_COUNT * CONFIG_BT_AUDIO_BROADCAST_SRC_STREAM_COUNT)
-
-BUILD_ASSERT(CONFIG_BT_ISO_TX_BUF_COUNT >= TOTAL_BUF_NEEDED,
-	     "CONFIG_BT_ISO_TX_BUF_COUNT should be at least "
-	     "BROADCAST_ENQUEUE_COUNT * CONFIG_BT_AUDIO_BROADCAST_SRC_STREAM_COUNT");
+#define MUSIC_FILENAME "MUSIC.RAW"
+#define DISK_DRIVE_NAME "SD"
+#define DISK_MOUNT_PT "/"DISK_DRIVE_NAME":"
+#define MAX_PATH 128
 
 static struct bt_audio_lc3_preset preset_16_2_1 =
 	BT_AUDIO_LC3_BROADCAST_PRESET_16_2_1(BT_AUDIO_LOCATION_FRONT_LEFT,
 					     BT_AUDIO_CONTEXT_TYPE_UNSPECIFIED);
 static struct bt_audio_stream streams[CONFIG_BT_AUDIO_BROADCAST_SRC_STREAM_COUNT];
 static struct bt_audio_broadcast_source *broadcast_source;
-
 NET_BUF_POOL_FIXED_DEFINE(tx_pool,
-			  TOTAL_BUF_NEEDED,
+			  CONFIG_BT_AUDIO_BROADCAST_SRC_STREAM_COUNT,
 			  BT_ISO_SDU_BUF_SIZE(CONFIG_BT_ISO_TX_MTU), 8, NULL);
-static uint8_t mock_data[CONFIG_BT_ISO_TX_MTU];
-static uint16_t seq_num;
-static bool stopping;
 
 static K_SEM_DEFINE(sem_started, 0U, ARRAY_SIZE(streams));
 static K_SEM_DEFINE(sem_stopped, 0U, ARRAY_SIZE(streams));
 
-#define BROADCAST_SOURCE_LIFETIME  120U /* seconds */
+static const struct gpio_dt_spec led = GPIO_DT_SPEC_GET(DT_ALIAS(led2), gpios);
+
+static lc3_encoder_t lc3_encoder;
+static lc3_encoder_mem_16k_t lc3_encoder_mem;
+static uint16_t seq_num;
+static bool stopping;
+
+static FATFS fat_fs;
+static struct fs_mount_t mp = {
+	.type = FS_FATFS,
+	.fs_data = &fat_fs,
+};
+
+static const char *disk_mount_pt = DISK_MOUNT_PT;
+static uint64_t audio_file_size = 0;
+static uint64_t fs_seek_offset = 0;
+static struct fs_file_t f_entry;
+static int16_t audio_data[160] = {0};
+static uint8_t sd_data[160*2] = {0};
+static struct k_work_delayable audio_send_work;
+
+static int lsdir(const char *path)
+{
+	int res;
+	struct fs_dir_t dirp;
+	static struct fs_dirent entry;
+	int count = 0;
+
+	fs_dir_t_init(&dirp);
+
+	res = fs_opendir(&dirp, path);
+	if (res) {
+		printk("Error opening dir %s [%d]\n", path, res);
+		return res;
+	}
+	
+	printk("\nListing dir %s ...\n", path);
+	for (;;) {
+		res = fs_readdir(&dirp, &entry);
+
+		if (res || entry.name[0] == 0) {
+			break;
+		}
+
+		if (entry.type == FS_DIR_ENTRY_DIR) {
+			printk("[DIR ] %s\n", entry.name);
+		} else {
+			if(strcmp(entry.name, MUSIC_FILENAME) == 0) {
+				audio_file_size = entry.size;
+				printk("audio_file_size: %llu\n", audio_file_size);
+			}
+			printk("[FILE] %s (size = %zu)\n",
+				entry.name, entry.size);
+		}
+		count++;
+	}
+
+	fs_closedir(&dirp);
+	if (res == 0) {
+		res = count;
+	}
+
+	return res;
+}
+
+int sd_card_read(char *const data, uint64_t off, size_t *size)
+{
+	int ret;
+
+	ret = fs_seek(&f_entry, off, FS_SEEK_SET);
+	if (ret < 0) {
+		printk("Seek failed\n");
+		return ret;
+	}
+
+	ret = fs_read(&f_entry, data, *size);
+	if (ret < 0) {
+		printk("Read file failed\n");
+		return ret;
+	}
+
+	*size = ret;
+	if (*size == 0) {
+		printk("File is empty\n");
+	}
+
+	return 0;
+}
 
 static void stream_started_cb(struct bt_audio_stream *stream)
 {
@@ -45,44 +134,58 @@ static void stream_stopped_cb(struct bt_audio_stream *stream)
 	k_sem_give(&sem_stopped);
 }
 
-static void stream_sent_cb(struct bt_audio_stream *stream)
+static void lc3_audio_timer_timeout(struct k_work *work)
 {
-	static uint32_t sent_cnt;
 	struct net_buf *buf;
+	uint8_t *net_buffer;
 	int ret;
 
-	if (stopping) {
+	k_work_schedule(&audio_send_work, K_USEC(preset_16_2_1.qos.interval));
+
+	if (lc3_encoder == NULL) {
+		printk("LC3 encoder not setup, cannot encode data.\n");
 		return;
+	}
+
+	size_t data_size = 160*2; // TODO: change to codec setting
+	sd_card_read(sd_data, fs_seek_offset, &data_size);
+	fs_seek_offset += data_size;
+
+	if (fs_seek_offset >= audio_file_size) {
+		fs_seek_offset = 0;
+	}
+
+	for (size_t i = 0; i < data_size / 2; i++) {
+		audio_data[i] = ((int16_t)sd_data[(2*i)+1] << 8) | sd_data[2*i];
 	}
 
 	buf = net_buf_alloc(&tx_pool, K_FOREVER);
-	if (buf == NULL) {
-		printk("Could not allocate buffer when sending on %p\n",
-		       stream);
+	net_buf_reserve(buf, BT_ISO_CHAN_SEND_RESERVE);
+	net_buffer = net_buf_tail(buf);
+	buf->len += preset_16_2_1.qos.sdu;
+
+	int lc3_ret;
+	lc3_ret = lc3_encode(lc3_encoder, LC3_PCM_FORMAT_S16,
+					audio_data, 1, preset_16_2_1.qos.sdu,
+					net_buffer);
+	if (lc3_ret == -1) {
+		printk("LC3 encoder failed - wrong parameters?: %d",
+			lc3_ret);
 		return;
 	}
 
-	net_buf_reserve(buf, BT_ISO_CHAN_SEND_RESERVE);
-	net_buf_add_mem(buf, mock_data, preset_16_2_1.qos.sdu);
-	ret = bt_audio_stream_send(stream, buf, seq_num++,
+	ret = bt_audio_stream_send(&streams[0], buf, seq_num++,
 				   BT_ISO_TIMESTAMP_NONE);
 	if (ret < 0) {
-		/* This will end broadcasting on this stream. */
-		printk("Unable to broadcast data on %p: %d\n", stream, ret);
+		printk("Unable to broadcast data on %p: %d\n", &streams[0], ret);
 		net_buf_unref(buf);
 		return;
-	}
-
-	sent_cnt++;
-	if ((sent_cnt % 1000U) == 0U) {
-		printk("Sent %u total ISO packets\n", sent_cnt);
 	}
 }
 
 static struct bt_audio_stream_ops stream_ops = {
 	.started = stream_started_cb,
-	.stopped = stream_stopped_cb,
-	.sent = stream_sent_cb
+	.stopped = stream_stopped_cb
 };
 
 static int setup_broadcast_source(struct bt_audio_broadcast_source **source)
@@ -129,10 +232,70 @@ static int setup_broadcast_source(struct bt_audio_broadcast_source **source)
 	return 0;
 }
 
+static void init_lc3(void)
+{
+	int frame_duration_us, freq_hz;
+
+	freq_hz = bt_codec_cfg_get_freq(&preset_16_2_1.codec);
+	frame_duration_us = bt_codec_cfg_get_frame_duration_us(&preset_16_2_1.codec);
+
+	if (freq_hz < 0) {
+		printk("Error: Codec frequency not set, cannot start codec.");
+		return;
+	}
+
+	if (frame_duration_us < 0) {
+		printk("Error: Frame duration not set, cannot start codec.");
+		return;
+	}
+
+	lc3_encoder = lc3_setup_encoder(frame_duration_us,
+					freq_hz, 0, &lc3_encoder_mem);
+
+	if (lc3_encoder == NULL) {
+		printk("ERROR: Failed to setup LC3 encoder - wrong parameters?\n");
+	}
+}
+
 void main(void)
 {
 	struct bt_le_ext_adv *adv;
 	int err;
+
+	if (!gpio_is_ready_dt(&led)) {
+		printk("Error LED not ready.\n");
+		return;
+	}
+
+	err = gpio_pin_configure_dt(&led, GPIO_OUTPUT_INACTIVE);
+	if (err < 0) {
+		return;
+	}
+
+	mp.mnt_point = disk_mount_pt;
+
+	if (fs_mount(&mp) == FR_OK) {
+		lsdir(disk_mount_pt); // lsdir + extract filesize
+	} else {
+		printk("Error mounting disk.\n");
+		return;
+	}
+
+	init_lc3();
+
+	// Open file on SD
+	char abs_path_name[MAX_PATH + 1] = DISK_MOUNT_PT;
+	strcat(abs_path_name, "/");
+	strcat(abs_path_name, MUSIC_FILENAME);
+	fs_file_t_init(&f_entry);
+
+	err = fs_open(&f_entry, abs_path_name, FS_O_READ);
+	if (err) {
+		printk("Open file failed\n");
+		return;
+	}
+
+	k_work_init_delayable(&audio_send_work, lc3_audio_timer_timeout);
 
 	err = bt_enable(NULL);
 	if (err) {
@@ -140,11 +303,6 @@ void main(void)
 		return;
 	}
 	printk("Bluetooth initialized\n");
-
-	for (size_t i = 0U; i < ARRAY_SIZE(mock_data); i++) {
-		/* Initialize mock data */
-		mock_data[i] = i;
-	}
 
 	while (true) {
 		/* Broadcast Audio Streaming Endpoint advertising data */
@@ -246,60 +404,9 @@ void main(void)
 		}
 		printk("Broadcast source started\n");
 
-		/* Initialize sending */
-		for (size_t i = 0U; i < ARRAY_SIZE(streams); i++) {
-			for (unsigned int j = 0U; j < BROADCAST_ENQUEUE_COUNT; j++) {
-				stream_sent_cb(&streams[i]);
-			}
-		}
+		/* Start send timer */
+		k_work_schedule(&audio_send_work, K_MSEC(0));
 
-		printk("Waiting %u seconds before stopped\n",
-		       BROADCAST_SOURCE_LIFETIME);
-		k_sleep(K_SECONDS(BROADCAST_SOURCE_LIFETIME));
-
-		printk("Stopping broadcast source\n");
-		stopping = true;
-		err = bt_audio_broadcast_source_stop(broadcast_source);
-		if (err != 0) {
-			printk("Unable to stop broadcast source: %d\n", err);
-			return;
-		}
-
-		/* Wait for all to be stopped */
-		for (size_t i = 0U; i < ARRAY_SIZE(streams); i++) {
-			k_sem_take(&sem_stopped, K_FOREVER);
-		}
-		printk("Broadcast source stopped\n");
-
-		printk("Deleting broadcast source\n");
-		err = bt_audio_broadcast_source_delete(broadcast_source);
-		if (err != 0) {
-			printk("Unable to delete broadcast source: %d\n", err);
-			return;
-		}
-		printk("Broadcast source deleted\n");
-		broadcast_source = NULL;
-		seq_num = 0;
-
-		err = bt_le_per_adv_stop(adv);
-		if (err) {
-			printk("Failed to stop periodic advertising (err %d)\n",
-			       err);
-			return;
-		}
-
-		err = bt_le_ext_adv_stop(adv);
-		if (err) {
-			printk("Failed to stop extended advertising (err %d)\n",
-			       err);
-			return;
-		}
-
-		err = bt_le_ext_adv_delete(adv);
-		if (err) {
-			printk("Failed to delete extended advertising (err %d)\n",
-			       err);
-			return;
-		}
+		gpio_pin_set_dt(&led, 1);
 	}
 }

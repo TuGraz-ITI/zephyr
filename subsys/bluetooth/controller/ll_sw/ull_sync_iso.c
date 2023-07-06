@@ -498,10 +498,11 @@ void ull_sync_iso_setup(struct ll_sync_iso_set *sync_iso,
 	sync_iso_offset_us -= PDU_AC_US(pdu->len, sync_iso->sync->lll.phy,
 					ftr->phy_flags);
 	sync_iso_offset_us -= EVENT_TICKER_RES_MARGIN_US;
-	sync_iso_offset_us -= EVENT_JITTER_US;
+	sync_iso_offset_us -= EVENT_JITTER_US * 2; // BISON is a bit faster than normal
 	sync_iso_offset_us -= ready_delay_us;
 
-	interval_us -= lll->window_widening_periodic_us;
+	// BISON enforces a slight clock drift to increase robustness
+	// interval_us -= lll->window_widening_periodic_us;
 
 	/* TODO: active_to_start feature port */
 	sync_iso->ull.ticks_active_to_start = 0U;
@@ -650,7 +651,7 @@ void ull_sync_iso_done(struct node_rx_event_done *done)
 				force = 1U;
 			}
 		} else {
-			timeout_cleanup(sync_iso);
+			// timeout_cleanup(sync_iso); //  Disable the timeout
 
 			return;
 		}

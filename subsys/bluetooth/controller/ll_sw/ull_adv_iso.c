@@ -874,6 +874,10 @@ static uint16_t adv_iso_stream_handle_get(struct lll_adv_iso_stream *stream)
 static uint8_t ptc_calc(const struct lll_adv_iso *lll, uint32_t event_spacing,
 			uint32_t event_spacing_max)
 {
+	// HACK: manually set the ptc to 0 to achieve a pto of 0
+	// Necessary due to: https://discord.com/channels/720317445772017664/1075718330029199370
+	return 0U;
+
 	if (event_spacing < event_spacing_max) {
 		uint8_t ptc;
 

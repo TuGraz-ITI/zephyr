@@ -215,6 +215,7 @@ static void isr_spoofed_iso_done(void *param)
 		(void)memcpy(&crc_init[1], lll->base_crc_init, sizeof(uint16_t));
 
 		radio_phy_set(lll->phy, PHY_FLAGS_S8);
+		radio_tx_power_max_set();
 		radio_aa_set(access_addr);
 		radio_crc_configure(PDU_CRC_POLYNOMIAL, sys_get_le24(crc_init));
 		lll_chan_set(lll->ctrl_chan_use);
@@ -392,6 +393,7 @@ static int prepare_cb_common(struct lll_prepare_param *p)
 
 	phy = lll->phy;
 	radio_phy_set(phy, PHY_FLAGS_S8);
+	radio_tx_power_max_set();
 	radio_aa_set(access_addr);
 	radio_crc_configure(PDU_CRC_POLYNOMIAL, sys_get_le24(crc_init));
 	lll_chan_set(data_chan_use);

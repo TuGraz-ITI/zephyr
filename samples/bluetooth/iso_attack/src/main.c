@@ -37,6 +37,30 @@ static K_SEM_DEFINE(sem_per_big_info, 0, 1);
 static K_SEM_DEFINE(sem_big_sync, 0, BIS_ISO_CHAN_COUNT);
 static K_SEM_DEFINE(sem_big_sync_lost, 0, BIS_ISO_CHAN_COUNT);
 
+static const struct gpio_dt_spec button = GPIO_DT_SPEC_GET(DT_ALIAS(sw0), gpios);
+static struct gpio_dt_spec led1 = GPIO_DT_SPEC_GET(DT_ALIAS(led0), gpios);
+static struct gpio_dt_spec led2 = GPIO_DT_SPEC_GET(DT_ALIAS(led1), gpios);
+static struct gpio_dt_spec led3 = GPIO_DT_SPEC_GET(DT_ALIAS(led2), gpios);
+static struct gpio_dt_spec led4 = GPIO_DT_SPEC_GET(DT_ALIAS(led3), gpios);
+static struct gpio_callback button_cb_data;
+
+static uint8_t attack_on = 0;
+
+void button_pressed(const struct device *dev, struct gpio_callback *cb,
+		    uint32_t pins)
+{
+	gpio_pin_toggle_dt(&led1);
+	gpio_pin_toggle_dt(&led2);
+	gpio_pin_toggle_dt(&led3);
+	gpio_pin_toggle_dt(&led4);
+	attack_on ^= 1;
+	printk("BISON STARTED!\n");
+	
+	if(!attack_on) {
+		NVIC_SystemReset();
+	}
+}
+
 static void scan_recv(const struct bt_le_scan_recv_info *info,
 		      struct net_buf_simple *buf)
 {
@@ -132,6 +156,33 @@ void main(void)
 	int err;
 
 	printk("Hello, I'm Mallory ...\n");
+	printk("PRESS START ...\n");
+
+	/* Initialize the LEDs and the button */
+	if (!gpio_is_ready_dt(&button) || !gpio_is_ready_dt(&led1) || !gpio_is_ready_dt(&led2) || 
+		!gpio_is_ready_dt(&led3) || !gpio_is_ready_dt(&led4)) {
+		printk("Error: button or leds not ready\n");
+		return;
+	}
+
+	err = gpio_pin_configure_dt(&button, GPIO_INPUT);
+	err |= gpio_pin_configure_dt(&led1, GPIO_OUTPUT_INACTIVE);
+	err |= gpio_pin_configure_dt(&led2, GPIO_OUTPUT_INACTIVE);
+	err |= gpio_pin_configure_dt(&led3, GPIO_OUTPUT_INACTIVE);
+	err |= gpio_pin_configure_dt(&led4, GPIO_OUTPUT_INACTIVE);
+	if (err != 0) {
+		printk("Error %d: failed to configure button or leds\n", err);
+		return;
+	}
+
+	err = gpio_pin_interrupt_configure_dt(&button, GPIO_INT_EDGE_TO_ACTIVE);
+	if (err != 0) {
+		printk("Error %d: failed to configure interrupt for button\n", err);
+		return;
+	}
+
+	gpio_init_callback(&button_cb_data, button_pressed, BIT(button.pin));
+	gpio_add_callback(button.port, &button_cb_data);
 
 	/* Initialize the Bluetooth Subsystem */
 	err = bt_enable(NULL);
@@ -142,6 +193,10 @@ void main(void)
 
 	bt_le_scan_cb_register(&scan_callbacks);
 	bt_le_per_adv_sync_cb_register(&sync_callbacks);
+
+	while(!attack_on) {
+		k_sleep(K_MSEC(1));
+	}
 
 	do {
 		per_adv_lost = false;

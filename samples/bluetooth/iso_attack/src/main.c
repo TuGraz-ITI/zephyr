@@ -11,6 +11,10 @@
 #include <zephyr/bluetooth/conn.h>
 #include <zephyr/bluetooth/iso.h>
 #include <zephyr/sys/byteorder.h>
+#include <zephyr/kernel.h>
+#include <zephyr/sys/printk.h>
+#include <zephyr/usb/usb_device.h>
+#include <zephyr/drivers/uart.h>
 
 #define TIMEOUT_SYNC_CREATE K_SECONDS(10)
 #define NAME_LEN            30
@@ -38,10 +42,7 @@ static K_SEM_DEFINE(sem_big_sync, 0, BIS_ISO_CHAN_COUNT);
 static K_SEM_DEFINE(sem_big_sync_lost, 0, BIS_ISO_CHAN_COUNT);
 
 static const struct gpio_dt_spec button = GPIO_DT_SPEC_GET(DT_ALIAS(sw0), gpios);
-static struct gpio_dt_spec led1 = GPIO_DT_SPEC_GET(DT_ALIAS(led0), gpios);
-static struct gpio_dt_spec led2 = GPIO_DT_SPEC_GET(DT_ALIAS(led1), gpios);
-static struct gpio_dt_spec led3 = GPIO_DT_SPEC_GET(DT_ALIAS(led2), gpios);
-static struct gpio_dt_spec led4 = GPIO_DT_SPEC_GET(DT_ALIAS(led3), gpios);
+static struct gpio_dt_spec led = GPIO_DT_SPEC_GET(DT_ALIAS(led0), gpios);
 static struct gpio_callback button_cb_data;
 
 static uint8_t attack_on = 0;
@@ -49,10 +50,7 @@ static uint8_t attack_on = 0;
 void button_pressed(const struct device *dev, struct gpio_callback *cb,
 		    uint32_t pins)
 {
-	gpio_pin_toggle_dt(&led1);
-	gpio_pin_toggle_dt(&led2);
-	gpio_pin_toggle_dt(&led3);
-	gpio_pin_toggle_dt(&led4);
+	gpio_pin_toggle_dt(&led);
 	attack_on ^= 1;
 	printk("BISON STARTED!\n");
 	
@@ -147,6 +145,22 @@ static struct bt_iso_big_sync_param big_sync_param = {
 	.sync_timeout = 100, /* in 10 ms units */
 };
 
+void usb_init_dongle(void) {
+#ifdef CONFIG_USB_DEVICE_STACK
+	const struct device *const dev = DEVICE_DT_GET(DT_CHOSEN(zephyr_console));
+	uint32_t dtr = 0;
+
+	if (usb_enable(NULL)) {
+		return;
+	}
+
+	while (!dtr) {
+		uart_line_ctrl_get(dev, UART_LINE_CTRL_DTR, &dtr);
+		k_sleep(K_MSEC(100));
+	}
+#endif
+}
+
 void main(void)
 {
 	struct bt_le_per_adv_sync_param sync_create_param;
@@ -155,21 +169,20 @@ void main(void)
 	uint32_t sem_timeout_us;
 	int err;
 
+	/* Initialize the USB Serial output for the nRF Dongle */
+	usb_init_dongle();
+
 	printk("Hello, I'm Mallory ...\n");
 	printk("PRESS START ...\n");
 
 	/* Initialize the LEDs and the button */
-	if (!gpio_is_ready_dt(&button) || !gpio_is_ready_dt(&led1) || !gpio_is_ready_dt(&led2) || 
-		!gpio_is_ready_dt(&led3) || !gpio_is_ready_dt(&led4)) {
+	if (!gpio_is_ready_dt(&button) || !gpio_is_ready_dt(&led)) {
 		printk("Error: button or leds not ready\n");
 		return;
 	}
 
 	err = gpio_pin_configure_dt(&button, GPIO_INPUT);
-	err |= gpio_pin_configure_dt(&led1, GPIO_OUTPUT_INACTIVE);
-	err |= gpio_pin_configure_dt(&led2, GPIO_OUTPUT_INACTIVE);
-	err |= gpio_pin_configure_dt(&led3, GPIO_OUTPUT_INACTIVE);
-	err |= gpio_pin_configure_dt(&led4, GPIO_OUTPUT_INACTIVE);
+	err |= gpio_pin_configure_dt(&led, GPIO_OUTPUT_INACTIVE);
 	if (err != 0) {
 		printk("Error %d: failed to configure button or leds\n", err);
 		return;

@@ -15,7 +15,8 @@ import re
 PROJECT_FOLDER = Path(__file__).resolve().parent
 BIN_FOLDER = (PROJECT_FOLDER / "bin").resolve()
 BUILD_FOLDER = Path(__file__).resolve().parent / "build"
-NRF5340_AUDIO_DK_NAME = "nrf52840dk_nrf52840"
+NRF52840_DK_NAME = "nrf52840dk_nrf52840"
+NRF52840_DONGLE_NAME = "nrf52840dongle_nrf52840"
 
 @dataclass
 class BuildConf:
@@ -48,6 +49,9 @@ def __main():
         "--pristine", default=False, action="store_true", help="Will build cleanly"
     )
     parser.add_argument(
+        "--dongle", default=False, action="store_true", help="Use nRF52840 Dongle instead of DK"
+    )
+    parser.add_argument(
         "-b",
         "--binaries",
         default=False,
@@ -67,7 +71,11 @@ def __main():
     if buildconf.pristine and BUILD_FOLDER.exists():
         shutil.rmtree(BUILD_FOLDER)
 
-    build_cmd = f"west build -b {NRF5340_AUDIO_DK_NAME}"
+    if options.dongle:
+        build_cmd = f"west build -b {NRF52840_DONGLE_NAME}"
+    else:
+        build_cmd = f"west build -b {NRF52840_DK_NAME}"
+    
     flash_cmd = f"west flash"
 
     ret_val = os.system(build_cmd)

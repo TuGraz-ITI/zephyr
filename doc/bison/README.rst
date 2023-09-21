@@ -12,7 +12,7 @@
 
 BISON: Attacking Bluetooth's Broadcast Isochronous Streams
 ***************
-This repository contains the source code for the BISON attack. This attack targets Bluetooth's broadcast isochronous streams (BISes), exploiting the plaintext metadata as well as the vague specification of the Broadcast_Code exchange. Further information can be found in the corresponding paper by Theo Gasteiger, Carlo Alberto Boano, and Kay Römer in Proc. of the 20th EWSN Conf. 2023. 
+This repository contains the source code for the BISON attack. This attack targets Bluetooth's broadcast isochronous streams (BISes), exploiting the plaintext metadata as well as the vague specification of the Broadcast_Code exchange. Further information can be found in the `corresponding paper <http://www.carloalbertoboano.com/documents/gasteiger23bison.pdf>`_ by Theo Gasteiger, Carlo Alberto Boano, and Kay Römer in Proc. of the 20th EWSN Conf. 2023. 
 
 Video Demonstration
 ***************

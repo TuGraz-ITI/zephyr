@@ -58,7 +58,7 @@ static uint16_t cons_blk_idx = 0;
 static bool streaming = false;
 
 static const struct gpio_dt_spec led_blue = GPIO_DT_SPEC_GET(DT_ALIAS(led2), gpios);
-static const struct gpio_dt_spec led_green = GPIO_DT_SPEC_GET(DT_ALIAS(led1), gpios);
+static const struct gpio_dt_spec led_red = GPIO_DT_SPEC_GET(DT_ALIAS(led0), gpios);
 
 static void bound_cb(void *priv) {}
 static void recv_cb(const void *data, size_t len, void *priv)
@@ -69,7 +69,7 @@ static void recv_cb(const void *data, size_t len, void *priv)
 
 		if (channel_map[0] != 0xff) {
 			gpio_pin_set_dt(&led_blue, 0);
-			gpio_pin_set_dt(&led_green, 1);
+			gpio_pin_set_dt(&led_red, 1);
 		}
 	}
 }
@@ -93,7 +93,7 @@ static void stream_stopped_cb(struct bt_audio_stream *stream)
 {
 	printk("Stream %p stopped\n", stream);
 	gpio_pin_set_dt(&led_blue, 0);
-	gpio_pin_set_dt(&led_green, 0);
+	gpio_pin_set_dt(&led_red, 0);
 	streaming = false;
 }
 
@@ -351,18 +351,24 @@ static void init_lc3(void)
 	}
 }
 
+static uint16_t no_stream_ttl = 5000; // 500 packets = 1s
+
 static void audio_datapath_i2s_blk_complete(uint32_t frame_start_ts, uint32_t *rx_buf_released,
 					    uint32_t const *tx_buf_released)
 {
-	if (streaming) {
-		static uint8_t *tx_buf;
-		uint32_t next_out_blk_idx = NEXT_IDX(cons_blk_idx);
-		tx_buf = (uint8_t *)&fifo[next_out_blk_idx * 32];
-		audio_i2s_set_next_buf(tx_buf, NULL);
-		cons_blk_idx = next_out_blk_idx;
-	} else {
-		hw_codec_soft_reset();
+	if(!streaming) {
+		memset(fifo, 0, 2560*2);
+
+		if(no_stream_ttl-- <= 0) {
+			NVIC_SystemReset(); // reset board
+		}
 	}
+
+	static uint8_t *tx_buf;
+	uint32_t next_out_blk_idx = NEXT_IDX(cons_blk_idx);
+	tx_buf = (uint8_t *)&fifo[next_out_blk_idx * 32];
+	audio_i2s_set_next_buf(tx_buf, NULL);
+	cons_blk_idx = next_out_blk_idx;
 }
 
 void main(void)
@@ -382,13 +388,13 @@ void main(void)
 		return;
 	}
 
-	if (!gpio_is_ready_dt(&led_blue) || !gpio_is_ready_dt(&led_green)) {
+	if (!gpio_is_ready_dt(&led_blue) || !gpio_is_ready_dt(&led_red)) {
 		printk("Init LEDs failed (err %d)\n", err);
 		return;
 	}
 
 	err = gpio_pin_configure_dt(&led_blue, GPIO_OUTPUT_INACTIVE);
-	err |= gpio_pin_configure_dt(&led_green, GPIO_OUTPUT_INACTIVE);
+	err |= gpio_pin_configure_dt(&led_red, GPIO_OUTPUT_INACTIVE);
 	if (err < 0) {
 		return;
 	}

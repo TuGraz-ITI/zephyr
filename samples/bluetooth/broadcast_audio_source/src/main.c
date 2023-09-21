@@ -18,7 +18,9 @@
 #include <lc3.h>
 #include <ff.h>
 
-#define MUSIC_FILENAME "MUSIC.RAW"
+#define NUM_MUSIC_FILES 2
+static char* music_filenames[NUM_MUSIC_FILES] = {"MUSIC1.RAW", "MUSIC2.RAW"};
+
 #define DISK_DRIVE_NAME "SD"
 #define DISK_MOUNT_PT "/"DISK_DRIVE_NAME":"
 #define MAX_PATH 128
@@ -36,6 +38,10 @@ static K_SEM_DEFINE(sem_started, 0U, ARRAY_SIZE(streams));
 static K_SEM_DEFINE(sem_stopped, 0U, ARRAY_SIZE(streams));
 
 static const struct gpio_dt_spec led = GPIO_DT_SPEC_GET(DT_ALIAS(led2), gpios);
+static const struct gpio_dt_spec button4 = GPIO_DT_SPEC_GET_OR(DT_ALIAS(sw3), gpios, {0});
+static const struct gpio_dt_spec button5 = GPIO_DT_SPEC_GET_OR(DT_ALIAS(sw4), gpios, {0});
+static struct gpio_callback button4_cb_data;
+static struct gpio_callback button5_cb_data;
 
 static lc3_encoder_t lc3_encoder;
 static lc3_encoder_mem_16k_t lc3_encoder_mem;
@@ -49,12 +55,18 @@ static struct fs_mount_t mp = {
 };
 
 static const char *disk_mount_pt = DISK_MOUNT_PT;
-static uint64_t audio_file_size = 0;
-static uint64_t fs_seek_offset = 0;
-static struct fs_file_t f_entry;
 static int16_t audio_data[160] = {0};
-static uint8_t sd_data[160*2] = {0};
+
 static struct k_work_delayable audio_send_work;
+struct musicFile {
+  uint64_t audio_file_size;
+  uint64_t fs_seek_offset;
+  struct fs_file_t f_entry;
+  uint8_t sd_data[160*2];
+};
+
+static struct musicFile musicFiles[2];
+static uint8_t music_file_idx = 0;
 
 static int lsdir(const char *path)
 {
@@ -82,10 +94,11 @@ static int lsdir(const char *path)
 		if (entry.type == FS_DIR_ENTRY_DIR) {
 			printk("[DIR ] %s\n", entry.name);
 		} else {
-			if(strcmp(entry.name, MUSIC_FILENAME) == 0) {
-				audio_file_size = entry.size;
-				printk("audio_file_size: %llu\n", audio_file_size);
-			}
+			for(uint8_t i = 0; i < NUM_MUSIC_FILES; i++) {
+				if(strcmp(entry.name, music_filenames[i]) == 0) {
+					musicFiles[i].audio_file_size = entry.size;
+				}
+			} 
 			printk("[FILE] %s (size = %zu)\n",
 				entry.name, entry.size);
 		}
@@ -100,17 +113,17 @@ static int lsdir(const char *path)
 	return res;
 }
 
-int sd_card_read(char *const data, uint64_t off, size_t *size)
+int sd_card_read(char *const data, uint64_t off, size_t *size, struct fs_file_t *f_entry)
 {
 	int ret;
 
-	ret = fs_seek(&f_entry, off, FS_SEEK_SET);
+	ret = fs_seek(f_entry, off, FS_SEEK_SET);
 	if (ret < 0) {
 		printk("Seek failed\n");
 		return ret;
 	}
 
-	ret = fs_read(&f_entry, data, *size);
+	ret = fs_read(f_entry, data, *size);
 	if (ret < 0) {
 		printk("Read file failed\n");
 		return ret;
@@ -122,6 +135,18 @@ int sd_card_read(char *const data, uint64_t off, size_t *size)
 	}
 
 	return 0;
+}
+
+void button5_pressed(const struct device *dev, struct gpio_callback *cb,
+		    uint32_t pins)
+{
+	music_file_idx = 0;
+}
+
+void button4_pressed(const struct device *dev, struct gpio_callback *cb,
+		    uint32_t pins)
+{
+	music_file_idx = 1;
 }
 
 static void stream_started_cb(struct bt_audio_stream *stream)
@@ -148,15 +173,17 @@ static void lc3_audio_timer_timeout(struct k_work *work)
 	}
 
 	size_t data_size = 160*2; // TODO: change to codec setting
-	sd_card_read(sd_data, fs_seek_offset, &data_size);
-	fs_seek_offset += data_size;
 
-	if (fs_seek_offset >= audio_file_size) {
-		fs_seek_offset = 0;
+	sd_card_read(musicFiles[music_file_idx].sd_data, musicFiles[music_file_idx].fs_seek_offset, 
+		&data_size, &musicFiles[music_file_idx].f_entry);
+	musicFiles[music_file_idx].fs_seek_offset += data_size;
+
+	if (musicFiles[music_file_idx].fs_seek_offset >= musicFiles[music_file_idx].audio_file_size) {
+		musicFiles[music_file_idx].fs_seek_offset = 0;
 	}
 
 	for (size_t i = 0; i < data_size / 2; i++) {
-		audio_data[i] = ((int16_t)sd_data[(2*i)+1] << 8) | sd_data[2*i];
+		audio_data[i] = ((int16_t)musicFiles[music_file_idx].sd_data[(2*i)+1] << 8) | musicFiles[music_file_idx].sd_data[2*i];
 	}
 
 	buf = net_buf_alloc(&tx_pool, K_FOREVER);
@@ -262,15 +289,28 @@ void main(void)
 	struct bt_le_ext_adv *adv;
 	int err;
 
-	if (!gpio_is_ready_dt(&led)) {
-		printk("Error LED not ready.\n");
+	if (!gpio_is_ready_dt(&led) || !gpio_is_ready_dt(&button4) || !gpio_is_ready_dt(&button5)) {
+		printk("Error LED or Buttons not ready.\n");
 		return;
 	}
 
 	err = gpio_pin_configure_dt(&led, GPIO_OUTPUT_INACTIVE);
+	err |= gpio_pin_configure_dt(&button4, GPIO_INPUT);
+	err |= gpio_pin_configure_dt(&button5, GPIO_INPUT);
 	if (err < 0) {
 		return;
 	}
+
+	err = gpio_pin_interrupt_configure_dt(&button4, GPIO_INT_EDGE_TO_ACTIVE);
+	err |= gpio_pin_interrupt_configure_dt(&button5, GPIO_INT_EDGE_TO_ACTIVE);
+	if (err != 0) {
+		return;
+	}
+
+	gpio_init_callback(&button4_cb_data, button4_pressed, BIT(button4.pin));
+	gpio_init_callback(&button5_cb_data, button5_pressed, BIT(button5.pin));
+	gpio_add_callback(button4.port, &button4_cb_data);
+	gpio_add_callback(button5.port, &button5_cb_data);
 
 	mp.mnt_point = disk_mount_pt;
 
@@ -283,18 +323,20 @@ void main(void)
 
 	init_lc3();
 
-	// Open file on SD
-	char abs_path_name[MAX_PATH + 1] = DISK_MOUNT_PT;
-	strcat(abs_path_name, "/");
-	strcat(abs_path_name, MUSIC_FILENAME);
-	fs_file_t_init(&f_entry);
+	// Open music files on SD
+	for(uint8_t i = 0; i < NUM_MUSIC_FILES; i++) {
+		char abs_path_name[MAX_PATH + 1] = DISK_MOUNT_PT;
+		strcat(abs_path_name, "/");
+		strcat(abs_path_name, music_filenames[i]);
+		fs_file_t_init(&musicFiles[i].f_entry);
 
-	err = fs_open(&f_entry, abs_path_name, FS_O_READ);
-	if (err) {
-		printk("Open file failed\n");
-		return;
-	}
-
+		err = fs_open(&musicFiles[i].f_entry, abs_path_name, FS_O_READ);
+		if (err) {
+			printk("Open file failed\n");
+			return;
+		}
+	} 
+	
 	k_work_init_delayable(&audio_send_work, lc3_audio_timer_timeout);
 
 	err = bt_enable(NULL);
